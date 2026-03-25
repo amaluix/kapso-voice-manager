@@ -1,0 +1,12 @@
+[agent]
+name = "voice-agent-platform"
+image = "your-registry/voice-agent-platform:latest"
+
+[scaling]
+min_instances = 0
+max_instances = 10
+idle_timeout = 300
+
+[build]
+dockerfile = "Dockerfile"
+context = "."
