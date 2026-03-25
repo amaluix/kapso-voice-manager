@@ -22,14 +22,8 @@ const MODELS = [
   {
     value: "sarvam",
     label: "Sarvam AI",
-    badge: "Best for Malayalam",
-    hint: "Indian languages STT+TTS · Natural Malayalam voice",
-  },
-  {
-    value: "openai",
-    label: "OpenAI GPT-4o",
-    badge: "",
-    hint: "Deepgram STT + GPT-4o + ElevenLabs/Cartesia TTS",
+    badge: "Best for Indian languages",
+    hint: "Full Sarvam stack · STT + sarvam-m LLM + TTS · Natural Malayalam voice",
   },
 ];
 
@@ -39,11 +33,6 @@ const TTS_OPTIONS = {
   ],
   sarvam: [
     { value: "sarvam", label: "Sarvam (built-in)" },
-  ],
-  openai: [
-    { value: "elevenlabs", label: "ElevenLabs" },
-    { value: "cartesia",   label: "Cartesia" },
-    { value: "openai_tts", label: "OpenAI TTS" },
   ],
 };
 
@@ -65,12 +54,6 @@ const SARVAM_VOICES = [
   { value: "amol",     label: "Amol — Male (Marathi)" },
 ];
 
-const ELEVENLABS_VOICES = [
-  { value: "21m00Tcm4TlvDq8ikWAM", label: "Rachel — Female, US English" },
-  { value: "EXAVITQu4vr4xnSDxMaL", label: "Bella — Female, US English" },
-  { value: "TxGEqnHWrfWFTfGW9XjX", label: "Josh — Male, US English" },
-  { value: "pNInz6obpgDQGcFmaJgB", label: "Adam — Male, US English" },
-];
 
 const LANGUAGES = [
   { value: "en", label: "English" },
@@ -245,14 +228,12 @@ function AgentForm({ agent, onSave, onCancel }) {
     // Reset voice to sensible default per model
     if (llm === "gemini")  set("tts_voice", "Puck");
     if (llm === "sarvam")  set("tts_voice", "meera");
-    if (llm === "openai")  set("tts_voice", "");
   };
 
   // Determine which voice list to show
   const voiceList =
-    f.tts === "gemini"      ? GEMINI_VOICES :
-    f.tts === "sarvam"      ? SARVAM_VOICES :
-    f.tts === "elevenlabs"  ? ELEVENLABS_VOICES : [];
+    f.tts === "gemini" ? GEMINI_VOICES :
+    f.tts === "sarvam" ? SARVAM_VOICES : [];
 
   const handleSave = async () => {
     if (!f.name.trim())   return setError("Agent name is required");
@@ -409,7 +390,7 @@ function AgentForm({ agent, onSave, onCancel }) {
 // ── Agent Card ─────────────────────────────────────────────────────────────
 
 function AgentCard({ agent, onEdit, onDelete }) {
-  const modelLabel = { gemini: "Gemini Live", openai: "OpenAI", sarvam: "Sarvam" };
+  const modelLabel = { gemini: "Gemini Live", sarvam: "Sarvam AI" };
   const langLabel  = LANGUAGES.find(l => l.value === agent.language)?.label || agent.language;
 
   return (

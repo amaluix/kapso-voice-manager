@@ -10,8 +10,7 @@ when you change agent settings in the Kapso Page GUI.
 
 Pipeline options:
   gemini  → GeminiMultimodalLiveLLMService (default, speech-to-speech)
-  openai  → DeepgramSTT + GPT-4o + ElevenLabs/Cartesia TTS
-  sarvam  → SarvamSTT + GPT-4o + SarvamTTS (best for Malayalam)
+  sarvam  → SarvamSTT + Sarvam LLM (sarvam-m) + SarvamTTS (best for Indian languages)
 """
 
 import asyncio
@@ -251,53 +250,24 @@ async def build_pipeline(config: dict, transport: SmallWebRTCTransport) -> Pipel
             transport.output(),
         ])
 
-    # ── OpenAI + Deepgram STT + separate TTS ─────────────────────────────
-    elif llm_provider == "openai":
-        from pipecat.services.deepgram import DeepgramSTTService
-        from pipecat.services.openai import OpenAILLMService
-        from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-
-        stt = DeepgramSTTService(
-            api_key=os.getenv("DEEPGRAM_API_KEY"),
-            language=GEMINI_LANG_CODES.get(language, "en-US"),
-        )
-        llm = OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4o",
-        )
-        tts = await _build_tts(tts_provider, tts_voice, language)
-        ctx = OpenAILLMContext(
-            messages=[{"role": "system", "content": prompt}],
-            tools=tools,
-        )
-        agg = llm.create_context_aggregator(ctx)
-
-        return Pipeline([
-            transport.input(),
-            stt,
-            agg.user(),
-            llm,
-            tts,
-            transport.output(),
-            agg.assistant(),
-        ])
-
-    # ── Sarvam — best for Malayalam + other Indian languages ─────────────
+    # ── Sarvam full stack — best for Indian languages ─────────────────────
     elif llm_provider == "sarvam":
         from pipecat.services.sarvam import SarvamSTTService, SarvamTTSService
         from pipecat.services.openai import OpenAILLMService
         from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 
         lang_code = SARVAM_LANG_CODES.get(language, "en-IN")
-        voice     = tts_voice or ("meera" if language == "ml" else "meera")
+        voice     = tts_voice or "meera"
 
         stt = SarvamSTTService(
             api_key=os.getenv("SARVAM_API_KEY"),
             language_code=lang_code,
         )
+        # Sarvam LLM via OpenAI-compatible endpoint
         llm = OpenAILLMService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            model="gpt-4o",
+            api_key=os.getenv("SARVAM_API_KEY"),
+            base_url="https://api.sarvam.ai/v1",
+            model="sarvam-m",
         )
         tts = SarvamTTSService(
             api_key=os.getenv("SARVAM_API_KEY"),
@@ -321,40 +291,6 @@ async def build_pipeline(config: dict, transport: SmallWebRTCTransport) -> Pipel
         ])
 
     raise ValueError(f"Unknown llm provider: {llm_provider!r}")
-
-
-async def _build_tts(provider: str, voice: str, language: str):
-    if provider == "elevenlabs":
-        from pipecat.services.elevenlabs import ElevenLabsTTSService
-        return ElevenLabsTTSService(
-            api_key=os.getenv("ELEVENLABS_API_KEY"),
-            voice_id=voice or "21m00Tcm4TlvDq8ikWAM",
-        )
-    elif provider == "cartesia":
-        from pipecat.services.cartesia import CartesiaTTSService
-        return CartesiaTTSService(
-            api_key=os.getenv("CARTESIA_API_KEY"),
-            voice_id=voice or "a0e99841-438c-4a64-b679-ae501e7d6091",
-        )
-    elif provider == "openai_tts":
-        from pipecat.services.openai import OpenAITTSService
-        return OpenAITTSService(
-            api_key=os.getenv("OPENAI_API_KEY"),
-            voice=voice or "alloy",
-        )
-    elif provider == "sarvam":
-        from pipecat.services.sarvam import SarvamTTSService
-        return SarvamTTSService(
-            api_key=os.getenv("SARVAM_API_KEY"),
-            voice=voice or "meera",
-            language_code=SARVAM_LANG_CODES.get(language, "en-IN"),
-        )
-    # fallback
-    from pipecat.services.elevenlabs import ElevenLabsTTSService
-    return ElevenLabsTTSService(
-        api_key=os.getenv("ELEVENLABS_API_KEY"),
-        voice_id=voice or "21m00Tcm4TlvDq8ikWAM",
-    )
 
 
 # ── Main entrypoint ────────────────────────────────────────────────────────

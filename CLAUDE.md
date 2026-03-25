@@ -58,8 +58,7 @@ WhatsApp voice caller
 | llm value | Stack | Best for |
 |-----------|-------|---------|
 | `gemini` | Gemini Live (speech-to-speech) | Default, lowest latency, native Malayalam |
-| `openai` | Deepgram STT + GPT-4o + ElevenLabs | High quality English |
-| `sarvam` | Sarvam STT + GPT-4o + Sarvam TTS | Malayalam, Indian languages |
+| `sarvam` | Sarvam STT + sarvam-m LLM + Sarvam TTS | Indian languages, natural Malayalam voice |
 
 ## Gemini Voice Options
 
