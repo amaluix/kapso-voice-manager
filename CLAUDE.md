@@ -6,18 +6,26 @@ Default: Gemini Live · Languages: English + Malayalam
 ## Architecture
 
 ```
-Kapso Page (Agent Builder GUI)
-    ↓ kapso.invokeFunction()
-Kapso Functions (serverless KV CRUD on Cloudflare Workers)
-    ↓ env.KV
-Kapso KV Storage (agent configs)
-    ↓ fetched at call start
-Pipecat bot.py (single deployment)
-    ↓ builds pipeline from config
-Gemini Live (default) / Sarvam / OpenAI+ElevenLabs
-    ↓
-WhatsApp voice caller
+WhatsApp caller (inbound)
+    ↓ WebRTC call
+Pipecat Cloud (webhook: api.pipecat.daily.co/v1/public/webhooks/$ORG/$AGENT/whatsapp)
+    ↓ runner_args.body (agent_id, caller context)
+Pipecat bot.py — bot(runner_args: RunnerArguments)
+    ↓ fetch config
+Kapso KV Storage (via kapso-functions/agent-config)
+    ↓ builds pipeline
+Gemini Live (speech-to-speech, default) / Sarvam (planned)
+    ↓ audio
+WhatsApp caller
 ```
+
+## Call flow (inbound only — outbound requires user opt-in per WhatsApp policy)
+
+1. User calls your WhatsApp Business number
+2. Pipecat Cloud receives webhook, starts bot session
+3. bot() fetches agent config from Kapso KV
+4. Gemini Live pipeline starts, greets caller
+5. Bidirectional audio streams until hangup
 
 ## Key Files
 
@@ -55,15 +63,27 @@ WhatsApp voice caller
 
 ## Supported Pipelines
 
-| llm value | Stack | Best for |
-|-----------|-------|---------|
-| `gemini` | Gemini Live (speech-to-speech) | Default, lowest latency, native Malayalam |
-| `sarvam` | Sarvam STT + sarvam-m LLM + Sarvam TTS | Indian languages, natural Malayalam voice |
+| llm value | Stack | Status |
+|-----------|-------|--------|
+| `gemini` | GeminiLiveLLMService (s2s) — `gemini-2.5-flash-native-audio-preview-12-2025` | ✅ Active |
+| `sarvam` | SarvamSTT + sarvam-m + SarvamTTS | 🚧 Planned |
+
+Pipecat service class: `pipecat.services.google.gemini_live.GeminiLiveLLMService`
+Settings API: `GeminiLiveLLMService.Settings(model=..., voice=..., language=...)`
 
 ## Gemini Voice Options
 
 Puck (default), Aoede, Charon, Fenrir, Kore
 All voices speak Malayalam natively — no language-specific voice needed.
+
+## Pipecat Cloud Bot Entrypoint
+
+```python
+async def bot(runner_args: RunnerArguments):
+    # runner_args.webrtc_connection → SmallWebRTCConnection
+    # runner_args.body → {"agent_id": "...", "context": {...}}
+    # runner_args.handle_sigint → bool
+```
 
 ## Deploy Commands
 
@@ -97,9 +117,11 @@ For Sarvam: add language code to `SARVAM_LANG_CODES` in `bot.py` if needed.
 ## Status
 
 - [x] Kapso Functions (agent CRUD via KV)
-- [x] Kapso Page (Agent Builder GUI — Gemini/Sarvam/OpenAI, EN+ML)
-- [x] Pipecat bot.py (Gemini Live default, Malayalam support)
+- [x] Kapso Page (Agent Builder GUI — Gemini/Sarvam, EN+ML)
+- [x] Pipecat bot.py (Gemini Live, correct Pipecat Cloud API, Krisp filter)
+- [x] Inbound WhatsApp calls via Pipecat Cloud webhook
+- [ ] Sarvam full stack pipeline (STT + sarvam-m + TTS)
 - [ ] Call logs page
-- [ ] Outbound calling
+- [ ] Outbound calling (Note: WhatsApp outbound calls require user opt-in)
 - [ ] Knowledge base / RAG
 - [ ] Tool config UI (currently hardcoded in bot.py)

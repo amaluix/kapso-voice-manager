@@ -1,19 +1,21 @@
 """
 kapso-voice-manager — Pipecat Voice Agent
 ==========================================
-Default: Gemini Live (speech-to-speech, lowest latency)
-Languages: English + Malayalam (ml-IN)
+Pipeline: Gemini Live (speech-to-speech, lowest latency, native multilingual)
+Model: gemini-2.5-flash-native-audio-preview-12-2025
 
 Single deployment handles ALL agents.
-Fetches config from Kapso KV on every call — no redeploy needed
-when you change agent settings in the Kapso Page GUI.
+Fetches config from Kapso KV on every call — no redeploy needed.
 
-Pipeline options:
-  gemini  → GeminiMultimodalLiveLLMService (default, speech-to-speech)
-  sarvam  → SarvamSTT + Sarvam LLM (sarvam-m) + SarvamTTS (best for Indian languages)
+Entrypoint: async def bot(runner_args: RunnerArguments)
+  Pipecat Cloud routes WhatsApp inbound calls here automatically.
+  Webhook URL: https://api.pipecat.daily.co/v1/public/webhooks/$ORG/$AGENT/whatsapp
+
+References:
+  https://docs.pipecat.ai/server/services/s2s/gemini-live.md
+  https://docs.pipecat.ai/deployment/pipecat-cloud/guides/whatsapp.md
 """
 
-import asyncio
 import os
 import httpx
 from loguru import logger
@@ -24,13 +26,27 @@ load_dotenv()
 from pipecat.pipeline.pipeline import Pipeline
 from pipecat.pipeline.runner import PipelineRunner
 from pipecat.pipeline.task import PipelineParams, PipelineTask
-from pipecat.transports.network.small_webrtc import SmallWebRTCTransport
+from pipecat.runner.types import RunnerArguments
 from pipecat.transports.base_transport import TransportParams
-from pipecat.frames.frames import TTSSpeakFrame
+from pipecat.transports.smallwebrtc.connection import SmallWebRTCConnection
+from pipecat.transports.smallwebrtc.transport import SmallWebRTCTransport
 
 
-# ── Language maps ──────────────────────────────────────────────────────────
+# ── Constants ──────────────────────────────────────────────────────────────
 
+# Recommended Gemini Live model (older models deprecated Dec 2025)
+# https://docs.pipecat.ai/server/services/s2s/gemini-live.md
+GEMINI_MODEL = "models/gemini-2.5-flash-native-audio-preview-12-2025"
+
+GEMINI_VOICES = {
+    "default": "Puck",
+    "female":  "Aoede",
+    "male":    "Charon",
+    "upbeat":  "Fenrir",
+    "soft":    "Kore",
+}
+
+# BCP-47 language codes supported by Gemini Live
 GEMINI_LANG_CODES = {
     "en": "en-US",
     "ml": "ml-IN",
@@ -42,6 +58,7 @@ GEMINI_LANG_CODES = {
     "mr": "mr-IN",
 }
 
+# Sarvam language codes (for future Sarvam pipeline)
 SARVAM_LANG_CODES = {
     "en": "en-IN",
     "ml": "ml-IN",
@@ -53,20 +70,8 @@ SARVAM_LANG_CODES = {
     "mr": "mr-IN",
 }
 
-# Gemini Live built-in voices
-GEMINI_VOICES = {
-    "default": "Puck",
-    "female":  "Aoede",
-    "male":    "Charon",
-    "upbeat":  "Fenrir",
-    "soft":    "Kore",
-}
 
-# Sarvam voices suited for Malayalam
-SARVAM_ML_VOICES = ["meera", "pavithra", "maitreyi"]
-
-
-# ── Default prompts ────────────────────────────────────────────────────────
+# ── Default system prompts ─────────────────────────────────────────────────
 
 PROMPT_BILINGUAL = """\
 You are a helpful voice assistant for a business in Kerala, India.
@@ -87,24 +92,11 @@ Voice call rules:
 - If you don't know something, say so and offer to find out
 """
 
-PROMPT_EN = """\
-You are a helpful voice assistant on a WhatsApp call.
-Keep every response to 1-2 short sentences.
-Never use bullet points or markdown.
-Be warm, professional, and get to the point quickly.
-"""
 
-PROMPT_ML = """\
-നിങ്ങൾ WhatsApp വഴി ഒരു ഉപഭോക്താവുമായി സംസാരിക്കുന്ന ഒരു സഹായകരമായ വോയ്സ് അസിസ്റ്റന്റ് ആണ്.
-ഓരോ മറുപടിയും 1-2 ചെറിയ വാക്യങ്ങളിൽ ഒതുക്കുക.
-ബുള്ളറ്റ് പോയിന്റുകൾ ഉപയോഗിക്കരുത്.
-ഊഷ്മളമായും സ്വാഭാവികമായും സംസാരിക്കുക.
-"""
-
-
-# ── Fetch config from Kapso KV ─────────────────────────────────────────────
+# ── Fetch agent config from Kapso KV ──────────────────────────────────────
 
 async def fetch_agent_config(agent_id: str) -> dict:
+    """Fetch agent config from Kapso KV via the agent-config function."""
     kapso_fn_url = os.getenv("KAPSO_AGENT_CONFIG_URL")
 
     if kapso_fn_url and agent_id:
@@ -125,14 +117,12 @@ async def fetch_agent_config(agent_id: str) -> dict:
         except Exception as e:
             logger.error(f"❌ KV fetch failed: {e}")
 
-    # Local dev fallback
     logger.info("📋 Using env var defaults")
     return {
         "id":        agent_id or "default",
         "name":      os.getenv("AGENT_NAME", "Assistant"),
         "prompt":    os.getenv("SYSTEM_PROMPT", PROMPT_BILINGUAL),
         "llm":       os.getenv("LLM_PROVIDER", "gemini"),
-        "tts":       os.getenv("TTS_PROVIDER", "gemini"),
         "tts_voice": os.getenv("TTS_VOICE", ""),
         "language":  os.getenv("LANGUAGE", "en"),
         "greeting":  os.getenv("GREETING", ""),
@@ -143,6 +133,7 @@ async def fetch_agent_config(agent_id: str) -> dict:
 # ── Tool builder ───────────────────────────────────────────────────────────
 
 def build_tools(tool_configs: list):
+    """Build Pipecat ToolsSchema from agent tool config list."""
     if not tool_configs:
         return None
 
@@ -157,7 +148,7 @@ def build_tools(tool_configs: list):
 
         if name == "check_order_status":
             async def check_order_status(order_id: str):
-                # TODO: your order API
+                # TODO: connect to your order management system
                 return {"status": "In transit", "eta": "2 business days"}
             schemas.append(FunctionSchema(
                 name="check_order_status",
@@ -169,7 +160,7 @@ def build_tools(tool_configs: list):
 
         elif name == "book_appointment":
             async def book_appointment(date: str, time: str, name: str):
-                # TODO: your calendar API
+                # TODO: connect to your calendar system
                 return {"confirmation": f"Booked for {name} on {date} at {time}"}
             schemas.append(FunctionSchema(
                 name="book_appointment",
@@ -210,144 +201,186 @@ def build_tools(tool_configs: list):
     return ToolsSchema(standard_tools=schemas) if schemas else None
 
 
-# ── Pipeline builder ───────────────────────────────────────────────────────
+# ── Pipeline builders ──────────────────────────────────────────────────────
 
-async def build_pipeline(config: dict, transport: SmallWebRTCTransport) -> Pipeline:
-    llm_provider = config.get("llm", "gemini")
-    tts_provider = config.get("tts", "gemini")
-    language     = config.get("language", "en")
-    prompt       = config.get("prompt") or PROMPT_BILINGUAL
-    tools        = build_tools(config.get("tools", []))
-    tts_voice    = config.get("tts_voice", "")
+async def build_gemini_pipeline(
+    config: dict,
+    transport: SmallWebRTCTransport,
+) -> Pipeline:
+    """
+    Gemini Live speech-to-speech pipeline.
+    Single service handles STT + LLM + TTS — lowest latency.
 
-    logger.info(f"🔧 Pipeline: llm={llm_provider} | lang={language}")
+    Ref: https://docs.pipecat.ai/server/services/s2s/gemini-live.md
+    """
+    from pipecat.services.google.gemini_live import GeminiLiveLLMService
 
-    # ── Gemini Live ───────────────────────────────────────────────────────
-    if llm_provider == "gemini":
-        from pipecat.services.google.gemini_multimodal_live import (
-            GeminiMultimodalLiveLLMService,
-            GeminiMultimodalLiveParams,
+    language  = config.get("language", "en")
+    tts_voice = config.get("tts_voice", "")
+    greeting  = config.get("greeting", "")
+    tools     = build_tools(config.get("tools", []))
+
+    voice_name = tts_voice or GEMINI_VOICES["default"]
+    lang_code  = GEMINI_LANG_CODES.get(language, "en-US")
+
+    # Prepend greeting instruction so Gemini speaks first on connection
+    prompt = config.get("prompt") or PROMPT_BILINGUAL
+    if greeting:
+        prompt = (
+            f'Start the conversation by saying exactly: "{greeting}"\n\n'
+            f"{prompt}"
         )
 
-        voice_name = tts_voice or GEMINI_VOICES["default"]
-        lang_code  = GEMINI_LANG_CODES.get(language, "en-US")
+    llm = GeminiLiveLLMService(
+        api_key=os.getenv("GOOGLE_API_KEY"),
+        system_instruction=prompt,
+        # inference_on_context_initialization=True causes Gemini to speak
+        # immediately on pipeline start (delivers the greeting)
+        inference_on_context_initialization=bool(greeting),
+        settings=GeminiLiveLLMService.Settings(
+            model=GEMINI_MODEL,
+            voice=voice_name,
+            language=lang_code,
+        ),
+        tools=tools,
+    )
 
-        # For Malayalam: use ml-IN so Gemini recognises Malayalam speech
-        # Gemini Live is natively multilingual — no separate STT needed
-        llm = GeminiMultimodalLiveLLMService(
-            api_key=os.getenv("GOOGLE_API_KEY"),
-            system_instruction=prompt,
-            params=GeminiMultimodalLiveParams(
-                voice_name=voice_name,
-                language_code=lang_code,
-            ),
-            tools=tools,
-        )
-
-        return Pipeline([
-            transport.input(),
-            llm,
-            transport.output(),
-        ])
-
-    # ── Sarvam full stack — best for Indian languages ─────────────────────
-    elif llm_provider == "sarvam":
-        from pipecat.services.sarvam import SarvamSTTService, SarvamTTSService
-        from pipecat.services.openai import OpenAILLMService
-        from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
-
-        lang_code = SARVAM_LANG_CODES.get(language, "en-IN")
-        voice     = tts_voice or "meera"
-
-        stt = SarvamSTTService(
-            api_key=os.getenv("SARVAM_API_KEY"),
-            language_code=lang_code,
-        )
-        # Sarvam LLM via OpenAI-compatible endpoint
-        llm = OpenAILLMService(
-            api_key=os.getenv("SARVAM_API_KEY"),
-            base_url="https://api.sarvam.ai/v1",
-            model="sarvam-m",
-        )
-        tts = SarvamTTSService(
-            api_key=os.getenv("SARVAM_API_KEY"),
-            voice=voice,
-            language_code=lang_code,
-        )
-        ctx = OpenAILLMContext(
-            messages=[{"role": "system", "content": prompt}],
-            tools=tools,
-        )
-        agg = llm.create_context_aggregator(ctx)
-
-        return Pipeline([
-            transport.input(),
-            stt,
-            agg.user(),
-            llm,
-            tts,
-            transport.output(),
-            agg.assistant(),
-        ])
-
-    raise ValueError(f"Unknown llm provider: {llm_provider!r}")
+    return Pipeline([
+        transport.input(),
+        llm,
+        transport.output(),
+    ])
 
 
-# ── Main entrypoint ────────────────────────────────────────────────────────
+async def build_sarvam_pipeline(
+    config: dict,
+    transport: SmallWebRTCTransport,
+) -> Pipeline:
+    """
+    Sarvam full stack: SarvamSTT → sarvam-m LLM → SarvamTTS.
+    Best for Indian languages. Work in progress.
+    """
+    from pipecat.services.sarvam import SarvamSTTService, SarvamTTSService
+    from pipecat.services.openai import OpenAILLMService
+    from pipecat.processors.aggregators.openai_llm_context import OpenAILLMContext
 
-async def run_bot(webrtc_connection, body: dict):
-    ctx          = body.get("context", {})
-    contact      = ctx.get("contact", {})
-    call_info    = ctx.get("call", {})
-    agent_id     = body.get("agent_id") or os.getenv("DEFAULT_AGENT_ID", "")
+    language  = config.get("language", "en")
+    tts_voice = config.get("tts_voice", "meera")
+    tools     = build_tools(config.get("tools", []))
+    prompt    = config.get("prompt") or PROMPT_BILINGUAL
+    lang_code = SARVAM_LANG_CODES.get(language, "en-IN")
+
+    stt = SarvamSTTService(
+        api_key=os.getenv("SARVAM_API_KEY"),
+        language_code=lang_code,
+    )
+    llm = OpenAILLMService(
+        api_key=os.getenv("SARVAM_API_KEY"),
+        base_url="https://api.sarvam.ai/v1",
+        model="sarvam-m",
+    )
+    tts = SarvamTTSService(
+        api_key=os.getenv("SARVAM_API_KEY"),
+        voice=tts_voice,
+        language_code=lang_code,
+    )
+    ctx = OpenAILLMContext(
+        messages=[{"role": "system", "content": prompt}],
+        tools=tools,
+    )
+    agg = llm.create_context_aggregator(ctx)
+
+    return Pipeline([
+        transport.input(),
+        stt,
+        agg.user(),
+        llm,
+        tts,
+        transport.output(),
+        agg.assistant(),
+    ])
+
+
+# ── Pipecat Cloud entrypoint ───────────────────────────────────────────────
+
+async def bot(runner_args: RunnerArguments):
+    """
+    Pipecat Cloud entrypoint for WhatsApp inbound voice calls.
+
+    Called automatically by Pipecat Cloud when a WhatsApp call arrives.
+    Webhook URL (configure in Meta Developer Console):
+      https://api.pipecat.daily.co/v1/public/webhooks/$ORG/$AGENT_NAME/whatsapp
+
+    runner_args.body contains the call context from Kapso:
+      - agent_id: which agent config to load from Kapso KV
+      - context.contact: caller info (wa_id, profile_name)
+      - context.call: call metadata (id)
+    """
+    body      = runner_args.body or {}
+    ctx       = body.get("context", {})
+    contact   = ctx.get("contact", {})
+    call_info = ctx.get("call", {})
+    agent_id  = body.get("agent_id") or os.getenv("DEFAULT_AGENT_ID", "")
+
     caller_name  = contact.get("profile_name", "there")
     caller_phone = contact.get("wa_id", "unknown")
     call_id      = call_info.get("id", "unknown")
 
     logger.info(
-        f"📞 Call {call_id} | agent={agent_id} | "
+        f"📞 Inbound call | id={call_id} | agent={agent_id} | "
         f"caller={caller_name} ({caller_phone})"
     )
 
-    # Accept the WhatsApp call
-    from pipecat.services.whatsapp import WhatsAppClient
-    wa = WhatsAppClient(
-        token=body.get("whatsapp_token") or os.getenv("WHATSAPP_TOKEN"),
-        phone_number_id=body.get("phone_number_id") or os.getenv("WHATSAPP_PHONE_NUMBER_ID"),
-    )
-    await wa.handle_webhook_request(body)
+    config       = await fetch_agent_config(agent_id)
+    llm_provider = config.get("llm", "gemini")
 
-    # Fetch agent config from Kapso KV
-    config   = await fetch_agent_config(agent_id)
-    greeting = config.get("greeting", "")
+    webrtc_connection: SmallWebRTCConnection = runner_args.webrtc_connection
 
-    # Build transport + pipeline
+    # Krisp noise filter — improves audio quality on WhatsApp calls in production
+    # Ref: https://docs.pipecat.ai/deployment/pipecat-cloud/guides/whatsapp.md
+    krisp_filter = None
+    if os.environ.get("ENV") != "local":
+        try:
+            from pipecat.audio.filters.krisp_viva_filter import KrispVivaFilter
+            krisp_filter = KrispVivaFilter()
+            logger.info("🎙️  Krisp noise filter enabled")
+        except ImportError:
+            logger.warning("⚠️  Krisp filter unavailable — running without noise filter")
+
     transport = SmallWebRTCTransport(
         webrtc_connection=webrtc_connection,
         params=TransportParams(
             audio_in_enabled=True,
+            audio_in_filter=krisp_filter,
             audio_out_enabled=True,
         ),
     )
-    pipeline = await build_pipeline(config, transport)
 
-    task   = PipelineTask(pipeline, params=PipelineParams(allow_interruptions=True))
-    runner = PipelineRunner()
+    if llm_provider == "gemini":
+        pipeline = await build_gemini_pipeline(config, transport)
+    elif llm_provider == "sarvam":
+        pipeline = await build_sarvam_pipeline(config, transport)
+    else:
+        logger.error(f"❌ Unknown llm provider: {llm_provider!r}, falling back to gemini")
+        pipeline = await build_gemini_pipeline(config, transport)
+
+    task = PipelineTask(
+        pipeline,
+        params=PipelineParams(
+            allow_interruptions=True,
+            enable_metrics=True,
+        ),
+    )
+
+    runner = PipelineRunner(handle_sigint=runner_args.handle_sigint)
 
     @transport.event_handler("on_client_connected")
     async def on_connected(t, client):
-        logger.info(f"🟢 Connected — {caller_name}")
-        if greeting:
-            await task.queue_frame(TTSSpeakFrame(text=greeting))
+        logger.info(f"🟢 Connected — {caller_name} ({caller_phone})")
 
     @transport.event_handler("on_client_disconnected")
     async def on_disconnected(t, client):
-        logger.info(f"🔴 Ended — {caller_name} ({call_id})")
+        logger.info(f"🔴 Ended — {caller_name} | call_id={call_id}")
         await task.cancel()
 
     await runner.run(task)
-
-
-async def bot(connection, body):
-    """Pipecat Cloud entrypoint."""
-    await run_bot(connection, body or {})

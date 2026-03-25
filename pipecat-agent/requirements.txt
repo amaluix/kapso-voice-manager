@@ -1,4 +1,6 @@
-pipecat-ai[google,openai,deepgram,elevenlabs,cartesia,silero]>=0.0.107
+# Pipecat with Gemini Live (speech-to-speech) + WebRTC transport + VAD
+# Ref: https://docs.pipecat.ai/server/services/s2s/gemini-live.md
+pipecat-ai[google,webrtc,silero]>=0.0.107
 httpx>=0.27.0
 python-dotenv>=1.0.0
 loguru>=0.7.0
